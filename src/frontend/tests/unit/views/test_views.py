@@ -1,5 +1,6 @@
 import base64
 import json
+from datetime import datetime
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -302,6 +303,7 @@ def test_report_item_type_submitted_form_model_uses_shared_normalization(app):
             id="source-with-icon",
             name="Test source",
             description="",
+            rank=3,
             type=COLLECTOR_TYPES.RSS_COLLECTOR,
             parameters={},
             icon=_VALID_PNG_BASE64,
@@ -327,12 +329,53 @@ def test_report_item_type_submitted_form_model_uses_shared_normalization(app):
         assert "An icon is currently uploaded." in html
         assert 'name="delete_icon"' in html
         assert 'data-testid="current-osint-icon"' in html
+        assert 'data-testid="osint-source-rank"' in html
+        assert 'value="3"' in html
+        assert 'aria-label="3 stars"' in html
+        assert "checked" in html
+
+    def test_osint_source_form_disables_rank_for_manual_source(self, app):
+        osint_source = OSINTSource.model_construct(
+            id="manual",
+            name="Manual",
+            description="",
+            rank=0,
+            type=COLLECTOR_TYPES.MANUAL_COLLECTOR,
+            parameters={},
+            icon=None,
+            enabled=True,
+            status=None,
+        )
+
+        with app.test_request_context("/"):
+            html = render_template(
+                "osint_source/osint_source_form.html",
+                model_name="osint_source",
+                submit_text="Update OSINT Source",
+                form_action='hx-put="/frontend/admin/sources/manual"',
+                form_error={},
+                osint_source=osint_source,
+                icon_accept="image/png",
+                collector_types=[],
+                parameters=[],
+                parameter_values={},
+            )
+
+        assert 'data-testid="osint-source-rank"' in html
+        assert 'name="rank" value="0"' in html
+        assert 'aria-label="Unrated"' in html
+        assert html.count('name="rank"') == 7
+        assert html.count("disabled") >= 6
 
 
-def test_admin_dashboard_renders_health_card(authenticated_client, responses_mock):
+def test_admin_dashboard_renders_health_card(authenticated_client, responses_mock, monkeypatch):
     for key in list(cache.cache._cache.keys()):
         if key.endswith("_dashboard"):
             cache.delete(key)
+
+    monkeypatch.setattr(Config, "BUILD_DATE", datetime.fromisoformat("2025-01-16T08:45:00+00:00"))
+    monkeypatch.setattr(Config, "GIT_INFO", {"tag": "1.3.5", "HEAD": "front456", "branch": "master"})
+
     responses_mock.get(
         f"{Config.TARANIS_CORE_URL}{AdminDashboardView.model._core_endpoint}",
         json={
@@ -361,13 +404,84 @@ def test_admin_dashboard_renders_health_card(authenticated_client, responses_moc
         status=200,
         content_type="application/json",
     )
+    responses_mock.get(
+        f"{Config.TARANIS_CORE_URL}{AdminDashboardView.model._core_endpoint}/build-info",
+        json={
+            "build_date": "2025-01-15T09:30:00+00:00",
+            "tag": "1.3.4",
+            "HEAD": "core123",
+            "branch": "master",
+        },
+        status=200,
+        content_type="application/json",
+    )
 
     response = authenticated_client.get(AdminDashboardView.get_base_route())
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
+    assert "Release Info" in html
+    assert "Core" in html
+    assert "Frontend" in html
+    assert "1.3.4" in html
+    assert "core123" in html
+    assert "1.3.5" in html
+    assert "front456" in html
     assert "System Health" in html
     assert "Degraded" in html
     assert "database" in html
     assert "broker" in html
     assert "workers" in html
+
+
+def test_admin_dashboard_renders_frontend_release_info_when_core_build_info_fails(authenticated_client, responses_mock, monkeypatch):
+    for key in list(cache.cache._cache.keys()):
+        if key.endswith("_dashboard"):
+            cache.delete(key)
+
+    monkeypatch.setattr(Config, "BUILD_DATE", datetime.fromisoformat("2025-01-16T08:45:00+00:00"))
+    monkeypatch.setattr(Config, "GIT_INFO", {"tag": "1.3.5", "HEAD": "front456", "branch": "master"})
+
+    responses_mock.get(
+        f"{Config.TARANIS_CORE_URL}{AdminDashboardView.model._core_endpoint}",
+        json={
+            "items": [
+                {
+                    "total_news_items": 10,
+                    "total_story_items": 5,
+                    "total_products": 2,
+                    "report_items_completed": 3,
+                    "report_items_in_progress": 1,
+                    "latest_collected": "2025-01-14T21:16:42.699574+01:00",
+                    "schedule_length": 4,
+                    "conflict_count": 0,
+                    "health_status": {
+                        "healthy": True,
+                        "services": {
+                            "database": "up",
+                            "broker": "up",
+                            "workers": "up",
+                        },
+                    },
+                    "worker_status": {},
+                }
+            ]
+        },
+        status=200,
+        content_type="application/json",
+    )
+    responses_mock.get(
+        f"{Config.TARANIS_CORE_URL}{AdminDashboardView.model._core_endpoint}/build-info",
+        json={"message": "unavailable"},
+        status=503,
+        content_type="application/json",
+    )
+
+    response = authenticated_client.get(AdminDashboardView.get_base_route())
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Frontend" in html
+    assert "1.3.5" in html
+    assert "front456" in html
+    assert "Unavailable" in html
